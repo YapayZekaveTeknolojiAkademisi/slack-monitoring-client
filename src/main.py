@@ -1,11 +1,13 @@
 """
-Merkezi giriş noktası: start, stop ve yardımcılar.
+Merkezi giriş noktası: startup, main, stop.
+python -m src ile API (uvicorn) + Slack listener (arka planda) birlikte başlar.
 """
 from __future__ import annotations
 
+import asyncio
 import os
-import signal
-import sys
+import threading
+import uvicorn
 
 from src.core.logger import (
     _build_logging_config,
@@ -13,60 +15,53 @@ from src.core.logger import (
     setup_logging,
     stop_logging,
 )
+from src.core.settings import get_settings
 from src.listener import queue_server, start as listener_start, stop as listener_stop
 
-LOG_DIR = os.environ.get("LOG_DIR", "logs")
+_listener_thread: threading.Thread | None = None
 
 
 # -----------------------------------------------------------------------------
-# Yardımcılar
+# Startup
 # -----------------------------------------------------------------------------
 
 
-def _ensure_log_dir() -> None:
-    """logs dizinini oluşturur."""
-    os.makedirs(LOG_DIR, exist_ok=True)
+def _ensure_log_dir(log_dir: str) -> None:
+    """Log dizinini oluşturur."""
+    os.makedirs(log_dir, exist_ok=True)
 
 
-def _register_signal_handlers() -> None:
-    """SIGINT/SIGTERM için graceful shutdown kaydeder."""
-    def _on_signal(_signum: int | None, _frame) -> None:
-        logger = get_logger()
-        logger.info("Kapatılıyor.")
-        stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _on_signal)
-    signal.signal(signal.SIGTERM, _on_signal)
-
-
-# -----------------------------------------------------------------------------
-# Ana fonksiyonlar: start, stop
-# -----------------------------------------------------------------------------
-
-
-def start() -> None:
-    """Uygulamayı başlatır: log dizini, logging, sinyaller, listener (bloklayıcı)."""
-    _ensure_log_dir()
-    setup_logging(_build_logging_config(LOG_DIR))
+async def _startup() -> None:
+    """
+    Uygulama başlamadan önce bir kez çalışır:
+    - Log dizinini oluşturur
+    - Queue manager'ı başlatır
+    """
     logger = get_logger()
-    logger.info("Başlatılıyor.")
-    _register_signal_handlers()
-    try:
-        listener_start()
-    except Exception:
-        logger.exception("Listener çöktü.")
-        stop()
-        sys.exit(1)
+    logger.info("Startup: starting")
+    settings = get_settings()
+    _ensure_log_dir(settings.log_dir)
+    logger.info("Startup: log dir ready")
+    queue_server.start()
+    logger.info("Startup: completed")
+
+
+# -----------------------------------------------------------------------------
+# Main & stop
+# -----------------------------------------------------------------------------
 
 
 def stop() -> None:
-    """Uygulamayı kapatır: listener, queue, logging."""
+    """Listener, queue ve logging'i kapatır."""
+    global _listener_thread
     logger = get_logger()
     try:
         listener_stop()
     except Exception as e:
         logger.warning("Listener kapatılırken hata: %s", e)
+    if _listener_thread is not None:
+        _listener_thread.join(timeout=5.0)
+        _listener_thread = None
     try:
         queue_server.stop()
     except Exception as e:
@@ -77,5 +72,31 @@ def stop() -> None:
         logger.warning("Logging kapatılırken hata: %s", e)
 
 
+def main() -> None:
+    """Uygulamayı uvicorn + Slack listener ile başlatır."""
+    global _listener_thread
+    settings = get_settings()
+    setup_logging(_build_logging_config(settings.log_dir))
+    logger = get_logger()
+    logger.info("Slack Monitoring System starting")
+
+    asyncio.run(_startup())
+
+    _listener_thread = threading.Thread(target=listener_start, daemon=False)
+    _listener_thread.start()
+    logger.info("Slack listener running in background")
+
+    try:
+        uvicorn.run(
+            "src.api.app:app",
+            host=settings.api_host,
+            port=settings.api_port,
+            reload=False,
+        )
+    finally:
+        logger.info("Slack Monitoring System stopping")
+        stop()
+
+
 if __name__ == "__main__":
-    start()
+    main()

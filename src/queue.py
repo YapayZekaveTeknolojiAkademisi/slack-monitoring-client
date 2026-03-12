@@ -56,9 +56,10 @@ class QueueServer(metaclass=SingletonMeta):
     def start(self) -> None:
         """
         Queue manager'ı başlatır ve paylaşılan kuyruğu hazırlar.
-        Singleton olduğu için aynı process içinde birden fazla kez
-        çağrılsa da tek bir instance çalışır.
+        Zaten başlatılmışsa tekrar başlatmaz (idempotent).
         """
+        if self._queue is not None:
+            return
         try:
             self._manager.start()
             self._queue = self._manager.get_queue()  # type: ignore[attr-defined]

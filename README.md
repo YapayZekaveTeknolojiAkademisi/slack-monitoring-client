@@ -1,29 +1,30 @@
 # Slack Monitoring System
 
-A production-ready Slack event listener that receives workspace events over Socket Mode, normalizes them into a standard payload format, and enqueues them for downstream consumers. Built for reliability: structured logging, graceful shutdown, and error handling that keeps the process running on event-level failures.
+Slack workspace event'lerini **Socket Mode** ile dinleyen, standart formatta kuyruğa alan ve HTTP API sunan servis. Tek process içinde hem Slack listener hem REST API çalışır; yapılandırma `.env`, loglar dönüşümlü dosyalara yazılır.
 
 ---
 
-## Features
+## Özellikler
 
-- **Slack Socket Mode** — No public URL or ngrok; connects to Slack via WebSocket using an app-level token.
-- **Event coverage** — Messages, reactions, channel lifecycle, user presence, file activity, and more (30+ event types).
-- **Shared queue** — Events are pushed to a multiprocessing queue (`QueueServer`) so other processes can consume them.
-- **Structured logging** — Three rotating log files: system (INFO), errors (JSON), and queue events.
-- **Graceful shutdown** — SIGINT/SIGTERM trigger clean teardown: Socket Mode disconnect, queue shutdown, log flush.
-- **Error resilience** — Event-handling errors are logged and answered with 200 so Slack does not retry indefinitely; the process keeps running.
-
----
-
-## Requirements
-
-- Python 3.10+
-- A Slack app with Socket Mode enabled and an **App-Level Token** (e.g. `xapp-...`) with `connections:write`.
-- Required scopes/subscriptions depend on the events you use (e.g. `message`, `reaction_added`, `member_joined_channel`).
+- **Slack Socket Mode** — Açık URL veya ngrok gerekmez; WebSocket ile Slack’e bağlanır (App-Level Token: `xapp-...`).
+- **Geniş event kapsamı** — Mesaj, reaction, kanal yaşam döngüsü, kullanıcı varlığı, dosya aktivitesi vb. (30+ event tipi).
+- **Paylaşılan kuyruk** — Event’ler multiprocessing queue (`QueueServer`) üzerinden diğer process’lere tüketilmek üzere sunulur.
+- **Yapılandırılmış loglama** — Üç dönüşümlü log: system (INFO), error (JSON), queue event’leri.
+- **Graceful shutdown** — SIGINT/SIGTERM ile Socket Mode kapanır, queue ve log flush edilir.
+- **HTTP API** — Health, status, info ve error log endpoint’leri (FastAPI + Uvicorn).
+- **Hata dayanıklılığı** — Event seviyesinde hatalar loglanır, Slack’e 200 dönülür; process ayakta kalır.
 
 ---
 
-## Installation
+## Gereksinimler
+
+- **Python 3.10+**
+- **Slack uygulaması** — Socket Mode açık, **App-Level Token** (`xapp-...`) ve `connections:write` yetkisi.
+- Event’lere göre gerekli scope/abonelikler (örn. `message`, `reaction_added`, `member_joined_channel`).
+
+---
+
+## Kurulum
 
 ```bash
 git clone <repository-url>
@@ -35,97 +36,141 @@ pip install -r requirements.txt
 
 ---
 
-## Configuration
+## Yapılandırma
 
-Copy the example env file and set your values:
+Örnek env dosyasını kopyalayıp değerleri doldurun:
 
 ```bash
 cp .env.example .env
 ```
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SLACK_APP_TOKEN` | Yes | Slack App-Level Token (`xapp-...`). |
-| `QUEUE_HOST` | No | Queue manager bind address (default: `127.0.0.1`). |
-| `QUEUE_PORT` | No | Queue manager port (default: `50000`). |
-| `QUEUE_AUTHKEY` | No* | Secret for queue manager auth. *Required in production: set `ENV=production` and a strong value. |
-| `LOG_DIR` | No | Directory for log files (default: `logs`). |
-| `ENV` | No | Set to `production` to enforce a non-default `QUEUE_AUTHKEY`. |
+| Değişken | Zorunlu | Açıklama |
+|----------|---------|----------|
+| `SLACK_APP_TOKEN` | Evet | Slack App-Level Token (`xapp-...`). |
+| `QUEUE_HOST` | Hayır | Queue manager bind adresi (varsayılan: `127.0.0.1`). |
+| `QUEUE_PORT` | Hayır | Queue manager port (varsayılan: `50000`). |
+| `QUEUE_AUTHKEY` | Hayır* | Queue manager auth secret. *Production’da zorunlu: `ENV=production` ve güçlü bir değer. |
+| `API_HOST` | Hayır | HTTP API bind adresi (varsayılan: `127.0.0.1`). |
+| `API_PORT` | Hayır | HTTP API port (varsayılan: `8002`). |
+| `LOG_DIR` | Hayır | Log dosyalarının dizini (varsayılan: `logs`). |
+| `ENV` | Hayır | `production` yapılırsa varsayılan `QUEUE_AUTHKEY` kabul edilmez. |
 
 ---
 
-## Usage
+## Çalıştırma
 
-**Run in foreground (development):**
+Tek komutla hem API hem Slack listener başlar:
 
 ```bash
+# Proje kökünden
 export PYTHONPATH=.
+python -m src
+```
+
+Veya:
+
+```bash
 python -m src.main
 ```
 
-**Run in background (start/stop scripts):**
+- **API** ana thread’de Uvicorn ile `API_HOST:API_PORT` (varsayılan `127.0.0.1:8002`) üzerinde çalışır.
+- **Slack listener** arka planda bir thread’de Socket Mode ile bağlanır.
+- Durdurmak: **Ctrl+C** (SIGINT); kapanış sırası: listener → queue → logging.
 
-```bash
-./start.sh   # Starts the process and writes PID to .pid
-./stop.sh    # Sends SIGTERM, then SIGKILL if needed
+---
+
+## Mimari (başlangıç akışı)
+
+1. **Logging** — `setup_logging(_build_logging_config(log_dir))` ile system / error / queue logları kurulur.
+2. **Startup** — `_startup()` (async): log dizini oluşturulur, `QueueServer.start()` çağrılır.
+3. **Listener thread** — `listener_start()` ayrı thread’de çalışır (Socket Mode bloklayıcı).
+4. **Uvicorn** — Ana thread’de `src.api.app:app` çalıştırılır; Ctrl+C ile önce Uvicorn biter, `finally` içinde `stop()` ile listener, queue ve logging kapatılır.
+
+---
+
+## API Endpoint’leri
+
+Base URL varsayılan: `http://127.0.0.1:8002`
+
+| Method | Endpoint | Açıklama |
+|--------|----------|----------|
+| GET | `/health` | Canlılık; `{"status": "ok"}`. |
+| GET | `/monitoring/api/v1/status` | Kuyruk durumu: `queue_ready`, `queue_size`. |
+| GET | `/monitoring/api/v1/info` | Uygulama bilgisi: `log_dir`, `env`. |
+| GET | `/monitoring/api/v1/logs` | `error.log` son kayıtları (JSON). Query: `limit` (1–1000, varsayılan 100). |
+
+**İnteraktif dokümantasyon**
+
+- Swagger UI: `http://127.0.0.1:8002/docs`
+- ReDoc: `http://127.0.0.1:8002/redoc`
+
+---
+
+## Loglama
+
+Tüm loglar `LOG_DIR` (varsayılan `logs/`) altındadır. Uygulama tek bir logger (`app`) kullanır.
+
+| Dosya | İçerik | Format |
+|-------|--------|--------|
+| `system.log` | Başlangıç, yaşam döngüsü, genel INFO. | Metin: `tarih \| seviye \| mesaj` |
+| `error.log` | Sadece ERROR ve üzeri. | Satır başına JSON (timestamp, level, message, exception vb.) |
+| `queue.log` | `queue_event` taşıyan kayıtlar (kuyruğa alınan event’ler). | Okunabilir: event_type, user_id, channel_id vb. |
+
+- Logger seviyesi: **INFO**. Queue event kayıtları INFO ile yazılır ve `queue.log`’a düşer.
+- Rotasyon: dosya başına 10 MB, 5 yedek.
+
+---
+
+## Kuyruk payload formatı
+
+Event’ler kuyruğa standart bir dict olarak yazılır:
+
+- **Zorunlu:** `event_type` (string).
+- **Ortak (opsiyonel):** `user_id`, `channel_id`, `ts`, `thread_ts`, `text`.
+- **Event’e özel:** örn. `reaction`, `links`, `file_id`, `channel_name`.
+
+Consumer’lar en az `event_type` içeren `dict[str, Any]` beklemeli; diğer anahtarlar event tipine göre değişir.
+
+---
+
+## Proje yapısı
+
 ```
-
-Stop with `Ctrl+C` when running in the foreground; shutdown is graceful.
-
----
-
-## Logging
-
-All logs go under `LOG_DIR` (default: `logs/`). One logger is used across the app (`app`).
-
-| File | Content | Format |
-|------|---------|--------|
-| `system.log` | Startup, lifecycle, and general INFO messages. | Plain text: `timestamp \| level \| message` |
-| `error.log` | ERROR and above only. | JSON (timestamp, level, message, exception if any) |
-| `queue.log` | Records that carry a `queue_event` (enqueued events). | Human-readable with event_type, user_id, channel_id, etc. |
-
-Log level is INFO; DEBUG is not written. Rotation: 10 MB per file, 5 backups.
-
----
-
-## Queue payload format
-
-Events are normalized to a common dict before being put on the queue:
-
-- **Required:** `event_type` (string).
-- **Common:** `user_id`, `channel_id`, `ts`, `thread_ts`, `text` (optional).
-- **Event-specific:** e.g. `reaction`, `links`, `file_id`, `channel_name`.
-
-Consumers should expect `dict[str, Any]` with at least `event_type`; other keys depend on the event type.
+.
+├── src/
+│   ├── __main__.py       # python -m src → main()
+│   ├── main.py           # main(), _startup(), stop(); uvicorn + listener thread
+│   ├── listener.py       # Bolt app, Socket Mode, event handler’lar, _enqueue()
+│   ├── queue.py          # QueueServer, build_message_event(), paylaşılan kuyruk
+│   ├── api/
+│   │   ├── app.py        # FastAPI uygulaması
+│   │   ├── routes.py     # /health, /monitoring/api/v1/*
+│   │   └── schemas.py    # Response modelleri
+│   ├── core/
+│   │   ├── logger.py     # Log config, formatter’lar, filter’lar, setup_logging
+│   │   ├── settings.py   # Pydantic settings (.env), prod QUEUE_AUTHKEY kontrolü
+│   │   └── singleton.py  # QueueServer için Singleton metaclass
+│   └── services/
+│       ├── log_service.py  # error.log okuma (get_error_logs)
+│       └── __init__.py
+├── logs/                 # system.log, error.log, queue.log (çalışırken oluşur)
+├── .env.example
+├── requirements.txt
+└── README.md
+```
 
 ---
 
 ## Production
 
-1. Set `ENV=production` and a strong `QUEUE_AUTHKEY` in `.env` (otherwise the app refuses to start).
-2. Run behind a process manager (e.g. systemd, supervisord, or Docker with a restart policy) so the process is restarted if it exits.
-3. Use `./start.sh` / `./stop.sh` or equivalent; ensure `LOG_DIR` is writable and has enough disk space for rotating logs.
+1. **`.env`** — `ENV=production` ve güçlü bir `QUEUE_AUTHKEY` tanımlayın; aksi halde uygulama başlamaz.
+2. **Process yönetimi** — systemd, supervisord veya Docker restart policy ile process çökünce yeniden başlatılsın.
+3. **API erişimi** — `/monitoring/*` ve özellikle `/logs` hassas bilgi içerebilir; reverse proxy, firewall veya API key ile kısıtlayın.
+4. **Bind adresi** — API’ye dışarıdan erişilecekse `API_HOST=0.0.0.0` kullanın; güvenliği proxy/firewall ile sağlayın.
+5. **Disk** — `LOG_DIR` yazılabilir olmalı ve dönüşümlü loglar için yeterli alan bırakın.
 
 ---
 
-## Project layout
+## Lisans
 
-```
-.
-├── src/
-│   ├── main.py          # Entry point: start(), stop(), signal handling
-│   ├── listener.py      # Bolt app, Socket Mode, event handlers, _enqueue()
-│   ├── queue.py         # QueueServer, build_message_event(), shared queue
-│   └── core/
-│       ├── logger.py    # Logging config, formatters, filters
-│       ├── settings.py  # Pydantic settings from .env
-│       └── singleton.py # Singleton metaclass for QueueServer
-├── logs/                # system.log, error.log, queue.log (created at runtime)
-├── .env.example
-├── requirements.txt
-├── start.sh
-├── stop.sh
-└── README.md
-```
-
----
+Proje lisans bilgisi repo ile birlikte verilir.

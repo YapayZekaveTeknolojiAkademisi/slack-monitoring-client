@@ -1,3 +1,5 @@
 slack-bolt
 pydantic
 pydantic-settings
+fastapi
+uvicorn[standard]

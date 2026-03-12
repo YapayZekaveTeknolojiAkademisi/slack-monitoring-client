@@ -12,6 +12,11 @@ class SystemSettings(BaseSettings):
     queue_port: int = Field(50000, description="Queue port")
     queue_authkey: bytes = Field(default=b"change-me", description="Queue authkey")
 
+    api_host: str = Field("127.0.0.1", description="HTTP API bind host")
+    api_port: int = Field(8002, description="HTTP API port (queue 50000 ile çakışmaz)")
+
+    log_dir: str = Field("logs", description="Log directory")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

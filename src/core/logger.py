@@ -6,61 +6,6 @@ import logging.config
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 from typing import Optional
 
-def _build_logging_config(log_dir: str = "logs") -> dict:
-    """logs/ altında 3 dosya: system.log, error.log, queue.log — hepsi RotatingFileHandler, kendi formatter'ı."""
-    _mod = __name__
-    _file_kw = {"maxBytes": 10485760, "backupCount": 5, "encoding": "utf-8"}
-
-    return {
-        "version": 1,
-        "disable_existing_loggers": False,
-        "formatters": {
-            "console": {"()": f"{_mod}.ConsoleFormatter"},
-            "system_file": {"()": f"{_mod}.SystemFileFormatter"},
-            "json": {"()": f"{_mod}.JsonFormatter"},
-            "queue": {"()": f"{_mod}.QueueFormatter"},
-        },
-        "filters": {
-            "system_only": {"()": f"{_mod}.SystemOnlyFilter"},
-            "error_only": {"()": f"{_mod}.ErrorOnlyFilter"},
-            "queue_event_only": {"()": f"{_mod}.QueueEventFilter"},
-        },
-        "handlers": {
-            "system_file": {
-                "()": "logging.handlers.RotatingFileHandler",
-                "level": "INFO",
-                "formatter": "system_file",
-                "filters": ["system_only"],
-                "filename": f"{log_dir}/system.log",
-                **_file_kw,
-            },
-            "error_file": {
-                "()": "logging.handlers.RotatingFileHandler",
-                "level": "ERROR",
-                "formatter": "json",
-                "filters": ["error_only"],
-                "filename": f"{log_dir}/error.log",
-                **_file_kw,
-            },
-            "queue_file": {
-                "()": "logging.handlers.RotatingFileHandler",
-                "level": "DEBUG",
-                "formatter": "queue",
-                "filters": ["queue_event_only"],
-                "filename": f"{log_dir}/queue.log",
-                **_file_kw,
-            },
-        },
-        "loggers": {
-            APP_LOGGER_NAME: {
-                "level": "INFO",
-                "handlers": ["system_file", "error_file", "queue_file"],
-                "propagate": False,
-            },
-        },
-    }
-
-
 # Tüm proje tek logger kullanır.
 APP_LOGGER_NAME = "app"
 
@@ -69,8 +14,6 @@ def get_logger() -> logging.Logger:
     """Proje genelinde kullanılacak tek app logger'ı döner."""
     return logging.getLogger(APP_LOGGER_NAME)
 
-
-LOGGING_CONFIG = _build_logging_config()
 
 _log_queue: Queue = Queue(maxsize=-1)
 _queue_handler: Optional[QueueHandler] = None
@@ -97,6 +40,14 @@ def _extract_event_payload(record: logging.LogRecord, attr_name: str) -> Optiona
                 return value
 
     return None
+
+
+class ConsoleFormatter(logging.Formatter):
+    """Konsol için sade, okunaklı format."""
+    def format(self, record: logging.LogRecord) -> str:
+        ts = datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S")
+        return f"{ts} | {record.levelname:<7} | {record.getMessage()}"
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -215,33 +166,86 @@ class SystemOnlyFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         return not hasattr(record, "queue_event")
 
+
+def _build_logging_config(log_dir: str = "logs") -> dict:
+    """logs/ altında 3 dosya: system.log, error.log, queue.log — hepsi RotatingFileHandler, kendi formatter'ı."""
+    _file_kw = {"maxBytes": 10485760, "backupCount": 5, "encoding": "utf-8"}
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "console": {"()": ConsoleFormatter},
+            "system_file": {"()": SystemFileFormatter},
+            "json": {"()": JsonFormatter},
+            "queue": {"()": QueueFormatter},
+        },
+        "filters": {
+            "system_only": {"()": SystemOnlyFilter},
+            "error_only": {"()": ErrorOnlyFilter},
+            "queue_event_only": {"()": QueueEventFilter},
+        },
+        "handlers": {
+            "system_file": {
+                "()": "logging.handlers.RotatingFileHandler",
+                "level": "INFO",
+                "formatter": "system_file",
+                "filters": ["system_only"],
+                "filename": f"{log_dir}/system.log",
+                **_file_kw,
+            },
+            "error_file": {
+                "()": "logging.handlers.RotatingFileHandler",
+                "level": "ERROR",
+                "formatter": "json",
+                "filters": ["error_only"],
+                "filename": f"{log_dir}/error.log",
+                **_file_kw,
+            },
+            "queue_file": {
+                "()": "logging.handlers.RotatingFileHandler",
+                "level": "DEBUG",
+                "formatter": "queue",
+                "filters": ["queue_event_only"],
+                "filename": f"{log_dir}/queue.log",
+                **_file_kw,
+            },
+        },
+        "loggers": {
+            APP_LOGGER_NAME: {
+                "level": "INFO",
+                "handlers": ["system_file", "error_file", "queue_file"],
+                "propagate": False,
+            },
+        },
+    }
+
+
+LOGGING_CONFIG = _build_logging_config()
+
+
 def setup_logging(config: dict):
     global _queue_listener, _log_queue
 
     logging.config.dictConfig(config)
 
-    # Tüm loglar Queue üzerinden geçecek şekilde QueueHandler ekle
+    # Logger'da sadece QueueHandler kalsın; dosya handler'ları QueueListener'a ver (çift yazı önlenir)
+    file_handlers = []
     for logger_name in config.get("loggers", {}):
         logger = logging.getLogger(logger_name)
+        for h in list(logger.handlers):
+            if not isinstance(h, QueueHandler):
+                file_handlers.append(h)
+                logger.removeHandler(h)
         if not any(isinstance(h, QueueHandler) for h in logger.handlers):
             logger.addHandler(QueueHandler(_log_queue))
 
-    # Var olan listener varsa durdur
     if _queue_listener is not None:
         _queue_listener.stop()
 
-    # Listener başlat (asenkron loglar için)
-    handlers = []
-    for logger_name in config.get("loggers", {}):
-        logger = logging.getLogger(logger_name)
-        for h in logger.handlers:
-            if not isinstance(h, QueueHandler):
-                handlers.append(h)
-
     _queue_listener = QueueListener(
         _log_queue,
-        *handlers,
-        respect_handler_level=True
+        *file_handlers,
+        respect_handler_level=True,
     )
     _queue_listener.start()
 

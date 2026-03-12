@@ -27,7 +27,7 @@ _socket_handler: Optional[SocketModeHandler] = None
 def _enqueue(event_type: str, item: dict) -> None:
     try:
         queue_server.put(item)
-        logger.debug("event=%s", event_type, extra={"queue_event": item})
+        logger.info("event=%s", event_type, extra={"queue_event": item})
     except Exception:
         logger.exception("Kuyruğa yazılamadı (event_type=%s)", event_type)
         raise
