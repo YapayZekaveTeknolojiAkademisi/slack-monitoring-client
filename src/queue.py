@@ -33,9 +33,12 @@ def build_message_event(event_type: str, **kwargs: Any) -> dict[str, Any]:
     return {"event_type": event_type, **kwargs}
 
 
+_shared_queue = queue.Queue()
+
+
 def _make_shared_queue() -> queue.Queue:
-    """Manager tarafından paylaşılacak queue factory'si."""
-    return queue.Queue()
+    """Manager tarafından paylaşılacak tek queue; her get_queue() aynı kuyruğu döndürür."""
+    return _shared_queue
 
 class _QueueManager(BaseManager):
     """Modül seviyesinde tanımlı; multiprocessing pickle için gerekli."""
